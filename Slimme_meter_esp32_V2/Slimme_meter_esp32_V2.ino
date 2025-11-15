@@ -144,8 +144,8 @@ const char* BEVESTIG_PERIODE = "bevestig_periode";
 /*
    WiFi Netwerknaam en paswoord
 */
-const char* APSSID = "IOT";
-const char* APPSWD = "iot_707_255";
+const char* APSSID = "";
+const char* APPSWD = "";
 
 bool dag_dir_bestaat = false;
 bool dir_test = false;
