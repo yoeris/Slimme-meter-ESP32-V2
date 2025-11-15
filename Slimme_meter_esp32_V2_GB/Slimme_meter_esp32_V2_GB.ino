@@ -29,7 +29,6 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include "FS.h"
-#include "SD.h"
 #include "SPI.h"
 #include <esp_task_wdt.h>       
 
@@ -43,7 +42,6 @@ Preferences pref;
 #define RXD2          16
 #define TXD2          17
 #define BLINKIE       4
-#define SD_CARD_ERROR 2
 
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status);
 void testDir(fs::FS &fs, const char * dirname, uint8_t levels);
@@ -208,15 +206,11 @@ char weergave_periode_char[12];
 char periode_char[25];
 char eenheid_char[10];
 char totaal_char[10];
-char kwh_sd_char[10];
 char data_kwh_array_char[32][10];
 char data_injectie_array_char[32][10];
 char data_piek_array_char[32][10];
 char data_gas_array_char[32][10];
 char periode_array_char[32][10];
-char injectie_sd_char[10];
-char piek_sd_char[10];
-char gas_sd_char[10];
 char tijd_char[12];
 char jaar_char[6];
 char maand_char[8];
@@ -246,9 +240,6 @@ float pwm1_kw_float;
 float pwm2_kw_float;
 float pwm2_dr_float;
 float data_verbruik_float[32];
-float kwh_sd_float;
-float injectie_sd_float;
-float gas_sd_float;
 float uitsturing_pwm1_float = 0.0;
 float uitsturing_pwm2_float = 0.0;
 float kwh_dag_float;
@@ -318,9 +309,6 @@ String aantal_dagen_string = "    ";
 String relais1_override = "     ";
 String relais2_override = "     ";
 String weergave_periode_string ="           ";
-String kwh_sd_string = "      ";
-String injectie_sd_string = "      ";
-String gas_sd_string = "       ";
 String uren_string = "        ";
 String minuten_string = "        ";
 String tijd_string = "         ";
@@ -371,11 +359,7 @@ void setup() {
    * regel 30 verander frequency = 4000000 naar frequency = 12000000 of hoger afhankelijk van de gebruikte SD kaart
    * 
    */
-  esp_task_wdt_config_t config = {
-    .timeout_ms = 15 * 1000,   //  15 seconds
-    .trigger_panic = true,     // Trigger panic if watchdog timer is not reset
-  };
-  esp_task_wdt_reconfigure(&config);
+  esp_task_wdt_init(15000, true);  // 15 seconds timeout
   enableLoopWDT();
   /*
    * einde instellen watchdogtimer
@@ -383,14 +367,8 @@ void setup() {
   delay(5000);
   pinMode(BLINKIE, OUTPUT);
   digitalWrite(BLINKIE, 0);
-  pinMode(SD_CARD_ERROR, OUTPUT);
-  digitalWrite(SD_CARD_ERROR, 0);
   Serial.begin(115200);
   Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
-  if(!SD.begin(5)){
-    Serial.println("Kontroleer SD kaart");
-    digitalWrite(SD_CARD_ERROR, 1);
-  }
   dag_dir_bestaat = false;
   jaar_dir_bestaat = false;
   maand_dir_bestaat = false;
@@ -655,22 +633,18 @@ void loop() {
         if(jaar_vorig_int != jaar_int){
         jaar_string = "/F" + String(jaar_int);
         jaar_string.toCharArray(jaar_char, jaar_string.length() + 1);
-        createDir(SD, jaar_char);
         }
         if(maand_vorig_int != maand_int){
           maand_string = "/F" + String(jaar_int) + "/F" + String (maand_int);
           maand_string.toCharArray(maand_char, maand_string.length() + 1);
-          createDir(SD, maand_char);
           aantal_dagen_file_string = "/F" + String(jaar_int) + "/F" + String(maand_int) + "/dagen";
           aantal_dagen_file_string.toCharArray(aantal_dagen_file_char, aantal_dagen_file_string.length() + 1);
           aantal_dagen_string = String(dag_int);
           aantal_dagen_string.toCharArray(aantal_dagen_char, aantal_dagen_string.length() + 1);
-          writeFile(SD, aantal_dagen_file_char, aantal_dagen_char);
         } 
         if(dag_vorig_int != dag_int){
           dag_string = "/F" + String(jaar_int) + "/F" + String (maand_int) + "/F" + String(dag_int);;
           dag_string.toCharArray(dag_char, dag_string.length() + 1);
-          createDir(SD, dag_char);
         }
         if(uren_vorig_int != uren_int){
           uur_verbruik_injectie();
@@ -1014,391 +988,13 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
 }
 
-void testDir(fs::FS &fs, const char * dirname, uint8_t levels){
-  //Serial.printf("Test dir: %s\n", dirname);
-  File root = fs.open(dirname);
-  if(root){
-    //Serial.println("Folder bestaat reeds");
-    dir_test = true;
-  }
-}
-    
-void testFile(fs::FS &fs, const char * path){
-  File file = fs.open(path);
-  if(file){
-      file_test = true;
-      file.close();
-  }
-}
 
-void createDir(fs::FS &fs, const char * path){
-  //Serial.printf("Creating Dir: %s\n", path);
-  if(fs.mkdir(path)){
-      //Serial.println("Dir created");
-  } else {
-      //Serial.println("mkdir failed");
-  }
-}
 
-void readFile(fs::FS &fs, const char * path){
-  //Serial.printf("Reading file: %s\n", path);
-  File file = fs.open(path);
-  if(!file){
-      //Serial.println("Failed to open file for reading");
-      return;
-  }
-  //Serial.print("Read from file: ");
-  while(file.available()){
-      Serial.write(file.read());
-  }
-  file.close();
-}
 
-void read_elektriciteit_verbruik_float(fs::FS &fs, const char * path){
-  //Serial.printf("Reading file: %s\n", path);
-  File file = fs.open(path);
-  if(!file){
-    return;
-  }
-  int teller = 0;
-  memset(kwh_sd_char, 0, sizeof(kwh_sd_char));
-  while(file.available()){
-    kwh_sd_char[teller] = file.read();
-    teller++;
-  }
-  file.close();
-  kwh_sd_string = String(kwh_sd_char);
-  kwh_sd_float = kwh_sd_string.toFloat();
-  //Serial.printf("%.3f", kwh_sd_float);
-  //Serial.println();
-}
- 
-void read_injectie_float(fs::FS &fs, const char * path){
-  //Serial.printf("Reading file: %s\n", path);
-  File file = fs.open(path);
-  if(!file){
-    return;
-  }
-  int teller = 0;
-  memset(injectie_sd_char, 0, sizeof(injectie_sd_char));
-  while(file.available()){
-    injectie_sd_char[teller] = file.read();
-    teller++;
-  }
-  file.close();
-  injectie_sd_string = String(injectie_sd_char);
-  injectie_sd_float = injectie_sd_string.toFloat();
-  // Serial.printf("%.3f", injectie_sd_float);
-  // Serial.println();
-}
 
-void read_gas_verbruik_float(fs::FS &fs, const char * path){
-  //Serial.printf("Reading file: %s\n", path);
-  File file = fs.open(path);
-  if(!file){
-    return;
-  }
-  int teller = 0;
-  memset(gas_sd_char, 0, sizeof(gas_sd_char));
-  while(file.available()){
-    gas_sd_char[teller] = file.read();
-    teller++;
-  }
-  file.close();
-  gas_sd_string = String(gas_sd_char);
-  gas_sd_float = gas_sd_string.toFloat();
-  // Serial.printf("%.3f", gas_sd_float);
-  // Serial.println();
-}
 
-void read_elektriciteit_verbruik_char(fs::FS &fs, const char * path){
-  // Serial.printf("Reading file: %s\n", path);
-  File file = fs.open(path);
-  if(!file){
-    return;
-  }
-  int teller = 0;
-  memset(kwh_sd_char, 0, sizeof(kwh_sd_char));
-  while(file.available()){
-    kwh_sd_char[teller] = file.read();
-    teller++;
-  }
-  file.close();
-  //kwh_sd_string = String(kwh_sd_char);
-  // Serial.println(kwh_sd_char);
-}
- 
-void read_injectie_char(fs::FS &fs, const char * path){
-  // Serial.printf("Reading file: %s\n", path);
-  File file = fs.open(path);
-  if(!file){
-    return;
-  }
-  int teller = 0;
-  memset(injectie_sd_char, 0, sizeof(injectie_sd_char));
-  while(file.available()){
-    injectie_sd_char[teller] = file.read();
-    teller++;
-  }
-  file.close();
-  // Serial.println(injectie_sd_char);
-}
 
-void read_piek_char(fs::FS &fs, const char * path){
-  // Serial.printf("Reading file: %s\n", path);
-  File file = fs.open(path);
-  if(!file){
-    return;
-  }
-  int teller = 0;
-  memset(piek_sd_char, 0, sizeof(piek_sd_char));
-  while(file.available()){
-    piek_sd_char[teller] = file.read();
-    teller++;
-  }
-  file.close();
-  // Serial.println(piek_sd_char);
-}
-  
-void read_gas_verbruik_char(fs::FS &fs, const char * path){
-  // Serial.printf("Reading file: %s\n", path);
-  File file = fs.open(path);
-  if(!file){
-    return;
-  }
-  int teller = 0;
-  memset(gas_sd_char, 0, sizeof(gas_sd_char));
-  while(file.available()){
-    gas_sd_char[teller] = file.read();
-    teller++;
-  }
-  file.close();
-  // Serial.println(gas_sd_char);
-}
 
-void read_dagen(fs::FS &fs, const char * path){
-  File file = fs.open(path);
-  int teller = 0;
-  memset(aantal_dagen_char, 0, sizeof(aantal_dagen_char));
-  while(file.available()){
-    aantal_dagen_char[teller] = file.read();
-    teller++;
-  }
-  file.close();
-  aantal_dagen_string = String(aantal_dagen_char);
-  dagen_int = aantal_dagen_string.toInt();
-}
-
-void writeFile(fs::FS &fs, const char * path, const char * message){
-  // Serial.printf("Writing file: %s\n", path);
-  File file = fs.open(path, FILE_WRITE);
-  if(!file){
-      // Serial.println("Failed to open file for writing");
-      return;
-  }
-  if(file.print(message)){
-      // Serial.println("File written");
-  } else {
-      // Serial.println("Write failed");
-  }
-  file.close();
-}
-
-void appendFile(fs::FS &fs, const char * path, const char * message){
-  // Serial.printf("Appending to file: %s\n", path);
-  File file = fs.open(path, FILE_APPEND);
-  if(!file){
-      // Serial.println("Failed to open file for appending");
-      return;
-  }
-  if(file.print(message)){
-      // Serial.println("Message appended");
-  } else {
-      // Serial.println("Append failed");
-  }
-  file.close();
-}
-
-void dir_bestaat_test(){
-  if(!jaar_dir_bestaat){
-      dir_test = false;
-      jaar_string = "/F" + String(jaar_int);
-      jaar_string.toCharArray(jaar_char, jaar_string.length() + 1);
-      testDir(SD, jaar_char, 1);
-      if(dir_test == false){
-        createDir(SD, jaar_char);
-      }
-      jaar_dir_bestaat = true;
-  }
-  if(!maand_dir_bestaat){
-    dir_test = false;
-    maand_string = "/F" + String(jaar_int) + "/F" + String (maand_int);
-    maand_string.toCharArray(maand_char, maand_string.length() + 1);
-    testDir(SD, maand_char, 1);
-    if(dir_test == false){
-      createDir(SD, maand_char);
-    }
-    maand_dir_bestaat = true;
-  }
-  if(!dag_dir_bestaat){
-    dir_test = false;
-    dag_string = "/F" + String(jaar_int) + "/F" + String (maand_int) + "/F" + String(dag_int);;
-    dag_string.toCharArray(dag_char, dag_string.length() + 1);
-    testDir(SD, dag_char, 1);
-    if(dir_test == false){
-      createDir(SD, dag_char);
-    }
-    dag_dir_bestaat = true;
-  }
-}
-
-void file_bestaat_test(){
-  if(!elektriciteit_jaar_file_bestaat){
-    file_test = false;
-    elektriciteit_jaar_file_string = "/F" + String(jaar_int) + "/E" + jaar_int;
-    elektriciteit_jaar_file_string.toCharArray(elektriciteit_jaar_file_char, elektriciteit_jaar_file_string.length() + 1);
-    testFile(SD, elektriciteit_jaar_file_char);
-    if(file_test == false){
-      verbruik_string = String(kwh_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, elektriciteit_jaar_file_char, verbruik_char);
-    }
-    elektriciteit_jaar_file_bestaat = true;
-  }
-  if(!injectie_jaar_file_bestaat){
-    file_test = false;
-    injectie_jaar_file_string = "/F" + String(jaar_int) + "/I" + jaar_int;
-    injectie_jaar_file_string.toCharArray(injectie_jaar_file_char, injectie_jaar_file_string.length() + 1);
-    testFile(SD, injectie_jaar_file_char);
-    if(file_test == false){
-      verbruik_string = String(injectie_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, injectie_jaar_file_char, verbruik_char);
-    }
-    injectie_jaar_file_bestaat = true;
-  }
-  if(!gas_jaar_file_bestaat){
-    file_test = false;
-    gas_jaar_file_string = "/F" + String(jaar_int) + "/G" + jaar_int;
-    gas_jaar_file_string.toCharArray(gas_jaar_file_char, gas_jaar_file_string.length() + 1);
-    testFile(SD, gas_jaar_file_char);
-    if(file_test == false){
-      verbruik_string = String(gas_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, gas_jaar_file_char, verbruik_char);
-    }
-    gas_jaar_file_bestaat = true;
-  }
-  if(!elektriciteit_maand_file_bestaat){
-    file_test = false;
-    elektriciteit_maand_file_string = "/F" + String(jaar_int) + "/E" + maand_int;
-    elektriciteit_maand_file_string.toCharArray(elektriciteit_maand_file_char, elektriciteit_maand_file_string.length() + 1);
-    testFile(SD, elektriciteit_maand_file_char);
-    if(file_test == false){
-      verbruik_string = String(kwh_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, elektriciteit_maand_file_char, verbruik_char);
-    }
-    elektriciteit_maand_file_bestaat = true;
-  }
-  if(!injectie_maand_file_bestaat){
-    file_test = false;
-    injectie_maand_file_string = "/F" + String(jaar_int) + "/I" + maand_int;
-    injectie_maand_file_string.toCharArray(injectie_maand_file_char, injectie_maand_file_string.length() + 1);
-    testFile(SD, injectie_maand_file_char);
-    if(file_test == false){
-      verbruik_string = String(injectie_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, injectie_maand_file_char, verbruik_char);
-    }
-    injectie_maand_file_bestaat = true;
-  }
-  if(!gas_maand_file_bestaat){
-    file_test = false;
-    gas_maand_file_string = "/F" + String(jaar_int) + "/G" + maand_int;
-    gas_maand_file_string.toCharArray(gas_maand_file_char, gas_maand_file_string.length() + 1);
-    testFile(SD, gas_maand_file_char);
-    if(file_test == false){
-      verbruik_string = String(gas_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, gas_maand_file_char, verbruik_char);
-    }
-    gas_maand_file_bestaat = true;
-  }
-  if(!elektriciteit_dag_file_bestaat){
-    file_test = false;
-    elektriciteit_dag_file_string = "/F" + String(jaar_int) + "/F" + String(maand_int) + "/E" + dag_int;
-    elektriciteit_dag_file_string.toCharArray(elektriciteit_dag_file_char, elektriciteit_dag_file_string.length() + 1);
-    testFile(SD, elektriciteit_dag_file_char);
-    if(file_test == false){
-      verbruik_string = String(kwh_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, elektriciteit_dag_file_char, verbruik_char);
-    }
-    elektriciteit_dag_file_bestaat = true;
-  }
-  if(!injectie_dag_file_bestaat){
-    file_test = false;
-    injectie_dag_file_string = "/F" + String(jaar_int) + "/F" + String(maand_int) + "/I" + dag_int;
-    injectie_dag_file_string.toCharArray(injectie_dag_file_char, injectie_dag_file_string.length() + 1);
-    testFile(SD, injectie_dag_file_char);
-    if(file_test == false){
-      verbruik_string = String(injectie_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, injectie_dag_file_char, verbruik_char);
-    }
-    injectie_dag_file_bestaat = true;
-  }
-  if(!gas_dag_file_bestaat){
-    file_test = false;
-    gas_dag_file_string = "/F" + String(jaar_int) + "/F" + String(maand_int) + "/G" + dag_int;
-    gas_dag_file_string.toCharArray(gas_dag_file_char, gas_dag_file_string.length() + 1);
-    testFile(SD, gas_dag_file_char);
-    if(file_test == false){
-      verbruik_string = String(gas_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, gas_dag_file_char, verbruik_char);
-    }
-    gas_dag_file_bestaat = true;
-  }
-  if(!elektriciteit_uur_file_bestaat){
-    file_test = false;
-    elektriciteit_uur_file_string = "/F" + String(jaar_int) + "/F" + String(maand_int) + "/F" + String(dag_int) + "/E" + uren_int;
-    elektriciteit_uur_file_string.toCharArray(elektriciteit_uur_file_char, elektriciteit_uur_file_string.length() + 1);
-    testFile(SD, elektriciteit_uur_file_char);
-    if(file_test == false){
-      verbruik_string = String(kwh_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, elektriciteit_uur_file_char, verbruik_char);
-    }
-    elektriciteit_uur_file_bestaat = true;
-  }
-  if(!injectie_uur_file_bestaat){
-    file_test = false;
-    injectie_uur_file_string = "/F" + String(jaar_int) + "/F" + String(maand_int) + "/F" + String(dag_int) + "/I" + uren_int;
-    injectie_uur_file_string.toCharArray(injectie_uur_file_char, injectie_uur_file_string.length() + 1);
-    testFile(SD, gas_uur_file_char);
-    if(file_test == false){
-      verbruik_string = String(injectie_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, injectie_uur_file_char, verbruik_char);
-    }
-    injectie_uur_file_bestaat = true;
-  }
-  if(!gas_uur_file_bestaat){
-    file_test = false;
-    gas_uur_file_string = "/F" + String(jaar_int) + "/F" + String(maand_int) + "/F" + String(dag_int) + "/G" + uren_int;
-    gas_uur_file_string.toCharArray(gas_uur_file_char, gas_uur_file_string.length() + 1);
-    testFile(SD, gas_uur_file_char);
-    if(file_test == false){
-      verbruik_string = String(gas_totaal_float, 3);
-      verbruik_string.toCharArray(verbruik_char, verbruik_string.length() + 1);
-      writeFile(SD, gas_uur_file_char, verbruik_char);
-    }
-    gas_uur_file_bestaat = true;
-  }
-}
 
 void jaar_verbruik_injectie(){
   elektriciteit_jaar_file_string = "/F" + String(jaar_vorig_int) + "/E" + jaar_vorig_int;
